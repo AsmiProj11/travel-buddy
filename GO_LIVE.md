@@ -1,86 +1,93 @@
--- Travel Buddy database schema
--- Run this in your Supabase project's SQL Editor (Project -> SQL Editor -> New query).
+import React, { useEffect, useState } from "react";
+import ReactDOM from "react-dom/client";
+import { Analytics } from "@vercel/analytics/react";
+import App from "./App.jsx";
+import LoginScreen from "./LoginScreen.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
+import { supabase } from "./lib/supabaseClient.js";
 
--- ─────────────────────────────────────────────────────────────
--- Personal data: one row per (user, key). Holds saved places,
--- recent views, and settings — exactly what used to live in
--- localStorage, now scoped to a real logged-in user.
--- ─────────────────────────────────────────────────────────────
-create table if not exists user_data (
-  user_id uuid not null references auth.users(id) on delete cascade,
-  data_key text not null,
-  value text not null,
-  updated_at timestamptz not null default now(),
-  primary key (user_id, data_key)
+// window.storage shim, backed by Supabase Postgres instead of localStorage.
+// Personal data (shared=false) is scoped to the signed-in user via
+// `user_data`, protected by Row Level Security (see supabase/schema.sql) —
+// each user can only read/write their own rows, enforced by the database
+// itself, not just app logic. Shared data (shared=true) — cached
+// AI-generated guides and nearby-radar results — lives in `shared_cache`,
+// reused across everyone.
+async function currentUserId() {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user?.id || null;
+}
+
+window.storage = {
+  async get(key, shared = false) {
+    if (shared) {
+      const { data } = await supabase.from("shared_cache").select("value").eq("cache_key", key).maybeSingle();
+      return data ? { key, value: data.value, shared } : null;
+    }
+    const uid = await currentUserId();
+    if (!uid) return null;
+    const { data } = await supabase.from("user_data").select("value").eq("user_id", uid).eq("data_key", key).maybeSingle();
+    return data ? { key, value: data.value, shared } : null;
+  },
+  async set(key, value, shared = false) {
+    if (shared) {
+      await supabase.from("shared_cache").upsert({ cache_key: key, value, updated_at: new Date().toISOString() });
+      return { key, value, shared };
+    }
+    const uid = await currentUserId();
+    if (!uid) return null;
+    await supabase.from("user_data").upsert({ user_id: uid, data_key: key, value, updated_at: new Date().toISOString() });
+    return { key, value, shared };
+  },
+  async delete(key, shared = false) {
+    if (shared) {
+      await supabase.from("shared_cache").delete().eq("cache_key", key);
+      return { key, deleted: true, shared };
+    }
+    const uid = await currentUserId();
+    if (!uid) return { key, deleted: false, shared };
+    await supabase.from("user_data").delete().eq("user_id", uid).eq("data_key", key);
+    return { key, deleted: true, shared };
+  },
+  async list(prefix = "", shared = false) {
+    if (shared) {
+      const { data } = await supabase.from("shared_cache").select("cache_key").like("cache_key", `${prefix}%`);
+      return { keys: (data || []).map(r => r.cache_key), prefix, shared };
+    }
+    const uid = await currentUserId();
+    if (!uid) return { keys: [], prefix, shared };
+    const { data } = await supabase.from("user_data").select("data_key").eq("user_id", uid).like("data_key", `${prefix}%`);
+    return { keys: (data || []).map(r => r.data_key), prefix, shared };
+  }
+};
+
+function LoadingScreen() {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#150F09", color: "#C2AD84", fontFamily: "sans-serif", fontSize: 13 }}>
+      Loading…
+    </div>
+  );
+}
+
+function Root() {
+  const [session, setSession] = useState(undefined); // undefined = still checking
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) return <LoadingScreen />;
+  if (!session) return <LoginScreen />;
+  return <App session={session} onLogout={() => supabase.auth.signOut()} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <Root />
+      <Analytics />
+    </ErrorBoundary>
+  </React.StrictMode>
 );
-
-alter table user_data enable row level security;
-
--- A user can only ever read/write/delete their OWN rows.
--- This is what makes it impossible for one traveler to see another's
--- saved places, even though everyone shares the same table.
-create policy "select own data" on user_data
-  for select using (auth.uid() = user_id);
-create policy "insert own data" on user_data
-  for insert with check (auth.uid() = user_id);
-create policy "update own data" on user_data
-  for update using (auth.uid() = user_id);
-create policy "delete own data" on user_data
-  for delete using (auth.uid() = user_id);
-
--- ─────────────────────────────────────────────────────────────
--- Shared cache: AI-generated place guides, nearby-radar results,
--- and translations. Not personal — the same landmark guide is
--- reused across every traveler instead of being re-generated
--- (and re-billed) per user. Any signed-in user can read/write it.
--- ─────────────────────────────────────────────────────────────
-create table if not exists shared_cache (
-  cache_key text primary key,
-  value text not null,
-  updated_at timestamptz not null default now()
-);
-
-alter table shared_cache enable row level security;
-
-create policy "signed-in users can read cache" on shared_cache
-  for select using (auth.role() = 'authenticated');
-create policy "signed-in users can write cache" on shared_cache
-  for insert with check (auth.role() = 'authenticated');
-create policy "signed-in users can refresh cache" on shared_cache
-  for update using (auth.role() = 'authenticated');
-
--- ─────────────────────────────────────────────────────────────
--- Admin access: as the project owner, you can view/search every
--- row in every table above — including every user's saved places —
--- from Supabase Studio (Table Editor) or the SQL Editor. Row Level
--- Security applies to the app's anon-key client only; it does not
--- restrict you in the dashboard, which is what makes it your admin
--- panel. See README.md for details.
--- ─────────────────────────────────────────────────────────────
-
--- ─────────────────────────────────────────────────────────────
--- AI usage tracking: one row per (user, day), incremented by
--- /api/claude on every genuine AI call (cache misses only — most
--- app usage never touches this). Used to enforce a real per-user
--- daily cap (DAILY_AI_LIMIT_PER_USER), independent of the in-memory
--- rate limiter, so it survives serverless cold starts.
--- ─────────────────────────────────────────────────────────────
-create table if not exists ai_usage (
-  user_id uuid not null references auth.users(id) on delete cascade,
-  day date not null default current_date,
-  count int not null default 0,
-  primary key (user_id, day)
-);
-
-alter table ai_usage enable row level security;
-
-create policy "select own usage" on ai_usage
-  for select using (auth.uid() = user_id);
-create policy "insert own usage" on ai_usage
-  for insert with check (auth.uid() = user_id);
-create policy "update own usage" on ai_usage
-  for update using (auth.uid() = user_id);
-
--- Helpful for the Refresh Memory endpoint, which scans shared_cache by
--- staleness (oldest first) to decide what to regenerate.
-create index if not exists shared_cache_updated_at_idx on shared_cache(updated_at);

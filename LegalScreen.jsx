@@ -1,109 +1,104 @@
-import React, { useEffect, useState } from "react";
-import { ArrowLeft, Users, Sparkles, MapPin, RotateCw, Loader2 } from "lucide-react";
-import { supabase } from "./lib/supabaseClient.js";
+#!/usr/bin/env bash
+#
+# Security check for a deployed Travel Buddy instance.
+# Tests that the live endpoints actually REJECT what they should reject —
+# not just that they exist. Run this after every deploy, and anytime you
+# change api/gemini.js, api/refresh-memory.js, or vercel.json.
+#
+# Usage: ./scripts/security-check.sh https://your-app.vercel.app
 
-function timeAgo(iso) {
-  if (!iso) return "never";
-  const diff = Date.now() - new Date(iso).getTime();
-  const days = Math.floor(diff / 86400000);
-  if (days === 0) return "today";
-  if (days === 1) return "yesterday";
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+set -u
+BASE="${1:-}"
+if [ -z "$BASE" ]; then
+  echo "Usage: $0 https://your-app.vercel.app"
+  exit 1
+fi
+BASE="${BASE%/}"
+
+PASS=0
+FAIL=0
+
+check() {
+  local desc="$1" expected="$2" actual="$3"
+  if [ "$actual" = "$expected" ]; then
+    echo "  PASS  $desc (got $actual)"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  $desc (expected $expected, got $actual)"
+    FAIL=$((FAIL+1))
+  fi
 }
 
-export default function AdminDashboard({ theme, onBack }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+echo "== Travel Buddy security check: $BASE =="
+echo
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const res = await fetch("/api/admin-stats", {
-        headers: { Authorization: `Bearer ${session?.access_token || ""}` }
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body?.error || `Error ${res.status}`);
-      setData(body);
-    } catch (e) {
-      setError(e.message || "Failed to load");
-    } finally {
-      setLoading(false);
-    }
-  }
+echo "-- Security headers on the main page --"
+HEADERS=$(curl -s -D - -o /dev/null "$BASE/")
+for h in "content-security-policy" "x-frame-options" "x-content-type-options" "strict-transport-security" "permissions-policy"; do
+  if echo "$HEADERS" | grep -qi "^$h:"; then
+    echo "  PASS  $h header present"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  $h header MISSING"
+    FAIL=$((FAIL+1))
+  fi
+done
+echo
 
-  useEffect(() => { load(); }, []);
+echo "-- /api/gemini: unauthenticated / malformed requests should be rejected --"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/gemini")
+check "GET (wrong method) -> 405" "405" "$CODE"
 
-  return (
-    <div>
-      <button onClick={onBack} style={{ background: "none", border: "none", color: theme.inkMuted, display: "flex", alignItems: "center", gap: 6, marginBottom: 10, cursor: "pointer", fontSize: 12.5 }}>
-        <ArrowLeft size={14} /> Back
-      </button>
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
+  -H "Content-Type: application/json" -H "Origin: $BASE" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
+check "POST with no auth token -> 401" "401" "$CODE"
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <p style={{ fontFamily: "var(--font-display)", fontSize: 24, fontWeight: 700, color: theme.ink, margin: 0 }}>Admin Dashboard</p>
-        <button onClick={load} disabled={loading} style={{
-          background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 999, padding: 8, cursor: "pointer"
-        }}>
-          <RotateCw size={14} color={theme.gold} style={loading ? { animation: "spin 1s linear infinite" } : {}} />
-        </button>
-      </div>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
+  -H "Content-Type: application/json" -H "Origin: $BASE" \
+  -H "Authorization: Bearer not-a-real-token" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
+check "POST with forged/garbage token -> 401" "401" "$CODE"
 
-      {loading && !data && (
-        <div style={{ textAlign: "center", padding: "60px 0" }}>
-          <Loader2 size={22} color={theme.gold} style={{ animation: "spin 1s linear infinite" }} />
-        </div>
-      )}
-      {error && <p style={{ fontSize: 12.5, color: theme.danger, textAlign: "center", padding: "20px 0" }}>{error}</p>}
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
+  -H "Content-Type: application/json" -H "Origin: https://some-other-site.example" \
+  -H "Authorization: Bearer not-a-real-token" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
+check "POST from a different Origin -> 403 or 401" "403" "$CODE"
+echo "        (401 is also acceptable here — either means it was rejected before reaching the AI)"
+echo
 
-      {data && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
-            <div style={{ background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 14, padding: "12px 14px" }}>
-              <Users size={16} color={theme.teal} />
-              <p style={{ fontSize: 22, fontWeight: 700, color: theme.ink, margin: "6px 0 0", fontFamily: "var(--font-display)" }}>{data.totalUsers}</p>
-              <p style={{ fontSize: 10.5, color: theme.inkMuted, margin: 0 }}>Total users</p>
-            </div>
-            <div style={{ background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 14, padding: "12px 14px" }}>
-              <MapPin size={16} color={theme.teal} />
-              <p style={{ fontSize: 22, fontWeight: 700, color: theme.ink, margin: "6px 0 0", fontFamily: "var(--font-display)" }}>{data.totalSavedPlaces}</p>
-              <p style={{ fontSize: 10.5, color: theme.inkMuted, margin: 0 }}>Places saved (all users)</p>
-            </div>
-            <div style={{ background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 14, padding: "12px 14px", gridColumn: "span 2" }}>
-              <Sparkles size={16} color={theme.gold} />
-              <p style={{ fontSize: 22, fontWeight: 700, color: theme.ink, margin: "6px 0 0", fontFamily: "var(--font-display)" }}>
-                {data.aiUsageToday} <span style={{ fontSize: 13, color: theme.inkMuted, fontWeight: 400 }}>AI calls today (cap: {data.aiDailyCap}/user/day)</span>
-              </p>
-            </div>
-          </div>
+echo "-- /api/refresh-memory: same checks, plus admin gating --"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/refresh-memory" \
+  -H "Origin: $BASE")
+check "POST with no auth token -> 401" "401" "$CODE"
 
-          {data.topPlaces.length > 0 && (
-            <div style={{ marginBottom: 18 }}>
-              <p style={{ fontFamily: "var(--font-display)", fontSize: 15, fontWeight: 700, color: theme.ink, margin: "0 0 8px" }}>Most-saved places</p>
-              {data.topPlaces.map((p, i) => (
-                <div key={p.name} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: i < data.topPlaces.length - 1 ? `1px dashed ${theme.border}` : "none" }}>
-                  <span style={{ fontSize: 12.5, color: theme.ink }}>{p.name}</span>
-                  <span style={{ fontSize: 12, color: theme.inkMuted, fontFamily: "var(--font-mono)" }}>{p.count} save{p.count === 1 ? "" : "s"}</span>
-                </div>
-              ))}
-            </div>
-          )}
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/refresh-memory" \
+  -H "Origin: $BASE")
+check "GET with no auth token -> 401" "401" "$CODE"
+echo "        (Full admin-gating and once-per-day checks need a REAL logged-in token to test —"
+echo "         see the manual step below.)"
+echo
 
-          <p style={{ fontFamily: "var(--font-display)", fontSize: 15, fontWeight: 700, color: theme.ink, margin: "0 0 8px" }}>Users ({data.users.length})</p>
-          {data.users.map(u => (
-            <div key={u.id} style={{ background: theme.surface, border: `1.5px dashed ${theme.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 8 }}>
-              <p style={{ fontSize: 12.5, color: theme.ink, fontWeight: 600, margin: "0 0 2px", wordBreak: "break-all" }}>{u.email}</p>
-              <p style={{ fontSize: 10.5, color: theme.inkMuted, margin: 0 }}>
-                Joined {timeAgo(u.createdAt)} · last active {timeAgo(u.lastSignIn)} · {u.savedCount} saved · {u.aiCallsToday} AI calls today
-              </p>
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  );
-}
+echo "-- /api/admin-stats: same checks (this one uses the service role key, so it's critical it's locked down) --"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/admin-stats" \
+  -H "Origin: $BASE")
+check "GET with no auth token -> 401" "401" "$CODE"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/admin-stats" \
+  -H "Origin: $BASE")
+check "POST (wrong method) -> 405" "405" "$CODE"
+echo
+
+echo "-- Sensitive files should not be served --"
+for path in ".env" ".env.local" "supabase/schema.sql" "package.json"; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$path")
+  check "$path -> 404 (not served)" "404" "$CODE"
+done
+echo
+
+echo "== $PASS passed, $FAIL failed =="
+if [ "$FAIL" -gt 0 ]; then
+  echo "Review the FAILs above before treating this deployment as production-ready."
+  exit 1
+fi
