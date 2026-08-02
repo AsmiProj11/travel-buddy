@@ -187,7 +187,15 @@ export default async function handler(req, res) {
   const safeBody = {
     contents: req.body.contents,
     generationConfig: {
-      maxOutputTokens: Math.min(Number(req.body.maxOutputTokens) || 2048, MAX_OUTPUT_TOKENS_CEILING)
+      maxOutputTokens: Math.min(Number(req.body.maxOutputTokens) || 2048, MAX_OUTPUT_TOKENS_CEILING),
+      // gemini-3.5-flash has "thinking" on by default, and thinking tokens
+      // are drawn from the same maxOutputTokens budget as the visible
+      // answer. For short, latency-sensitive calls (e.g. the 300-token
+      // photo-identify prompt) that leaves nothing for the actual text,
+      // producing finishReason: MAX_TOKENS with an empty response. This
+      // app just wants structured JSON back, not reasoning, so thinking
+      // is switched off entirely.
+      thinkingConfig: { thinkingBudget: 0 }
     },
     ...(req.body.tools ? { tools: req.body.tools } : {})
   };
