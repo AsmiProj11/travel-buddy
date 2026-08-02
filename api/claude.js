@@ -24,7 +24,47 @@
 //   cache misses (new places) — not every screen the user visits.
 
 import jwt from "jsonwebtoken";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createClient } from "@supabase/supabase-js";
+
+let jwks = null;
+function getJWKS() {
+  if (!jwks) {
+    const url = process.env.VITE_SUPABASE_URL;
+    jwks = createRemoteJWKSet(new URL(`${url}/auth/v1/.well-known/jwks.json`));
+  }
+  return jwks;
+}
+
+// Supabase projects created after mid-2025 sign login tokens with a modern
+// asymmetric key (ES256) by default, verified via a public JWKS endpoint —
+// not the older shared secret. Older projects may still use the legacy
+// HS256 shared-secret scheme. This tries the modern path first and falls
+// back to the legacy one, so it works regardless of when the project was
+// created.
+async function verifyUser(req) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return null;
+
+  try {
+    const { payload } = await jwtVerify(token, getJWKS());
+    return { id: payload.sub, token };
+  } catch (e) {
+    // Not a modern asymmetric token (or JWKS unavailable) — try legacy HS256.
+  }
+
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  if (secret) {
+    try {
+      const payload = jwt.verify(token, secret, { algorithms: ["HS256"] });
+      return { id: payload.sub, token };
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
+}
 
 const ALLOWED_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS_CEILING = 4096;
@@ -52,20 +92,6 @@ function isAllowedOrigin(req) {
   const okHosts = [host, "localhost", "127.0.0.1"];
   if (!origin && !referer) return false;
   return okHosts.some(h => h && (origin.includes(h) || referer.includes(h)));
-}
-
-function verifyUser(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) return null;
-  const secret = process.env.SUPABASE_JWT_SECRET;
-  if (!secret) return null;
-  try {
-    const payload = jwt.verify(token, secret, { algorithms: ["HS256"] });
-    return { id: payload.sub, token };
-  } catch (e) {
-    return null; // expired, forged, or malformed token
-  }
 }
 
 function validateBody(body) {
@@ -113,7 +139,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const user = verifyUser(req);
+  const user = await verifyUser(req);
   if (!user) {
     res.status(401).json({ error: "Sign in required" });
     return;

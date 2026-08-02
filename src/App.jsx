@@ -996,6 +996,15 @@ function CameraScreen({ theme, capturedImage, identifying, identifyError, loadin
             <p style={{ fontSize: 12.5, margin: 0 }}>Live preview appears here</p>
           </div>
         )}
+        {capturedImage && !identifying && !loadingPlace && (
+          <button onClick={onRetry} aria-label="Clear photo" style={{
+            position: "absolute", top: 10, right: 10, width: 30, height: 30, borderRadius: "50%",
+            background: "rgba(21,15,9,0.75)", border: `1.5px solid ${theme.ink}`, color: theme.ink,
+            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer"
+          }}>
+            <X size={16} />
+          </button>
+        )}
         {(identifying || loadingPlace) && (
           <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
             <Loader2 size={24} color={theme.gold} style={{ animation: "spin 1s linear infinite" }} />
