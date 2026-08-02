@@ -1,22 +1,31 @@
-// Vercel serverless function: POST /api/gemini
+// Vercel serverless function: POST /api/refresh-memory
 //
-// Security notes (unchanged from the Anthropic version):
-// - The Gemini API key lives only in this server-side env var. It is
-//   never sent to, or readable by, the browser.
-// - Every request must carry a valid Supabase login token (Authorization:
-//   Bearer <access_token>). The token's signature and expiry are verified
-//   here — an anonymous visitor who never logged in cannot call this
-//   endpoint at all.
-// - Only same-origin requests are accepted, so other websites can't ride
-//   on a logged-in user's session.
-// - The request shape is validated and the model/max-output-tokens/tools
-//   are pinned server-side rather than trusted from the client.
-// - A best-effort in-memory rate limit (speed bump) plus a REAL persistent
-//   daily cap per user (via the `ai_usage` table) are both enforced.
+// This is the ONLY place in the app that bulk-regenerates AI content —
+// everything else (camera scan, search, viewing a saved place) reads from
+// the shared cache first and only calls the AI on a genuine cache miss or
+// after 30 days of staleness. This endpoint exists for one person (the
+// admin) to deliberately refresh what's in that shared cache.
+//
+// It is intentionally NOT available to regular users: letting any signed-in
+// visitor trigger a bulk multi-place regeneration would turn a single click
+// into an unbounded AI bill. Access is restricted to the email addresses
+// listed in ADMIN_EMAILS.
 
 import jwt from "jsonwebtoken";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createClient } from "@supabase/supabase-js";
+
+const MODEL = "gemini-3.5-flash";
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const PLACE_REFRESH_BATCH = 5; // keep small — serverless functions have a duration limit
+function isAllowedOrigin(req) {
+  const origin = req.headers.origin || "";
+  const referer = req.headers.referer || "";
+  const host = req.headers.host || "";
+  const okHosts = [host, "localhost", "127.0.0.1"];
+  if (!origin && !referer) return false;
+  return okHosts.some(h => h && (origin.includes(h) || referer.includes(h)));
+}
 
 let jwks = null;
 function getJWKS() {
@@ -27,6 +36,10 @@ function getJWKS() {
   return jwks;
 }
 
+// Supabase projects created after mid-2025 sign login tokens with a modern
+// asymmetric key (ES256) by default, verified via a public JWKS endpoint —
+// not the older shared secret. This tries the modern path first and falls
+// back to the legacy HS256 shared-secret scheme for older projects.
 async function verifyUser(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -34,7 +47,7 @@ async function verifyUser(req) {
 
   try {
     const { payload } = await jwtVerify(token, getJWKS());
-    return { id: payload.sub, token };
+    return { id: payload.sub, email: (payload.email || "").toLowerCase(), token };
   } catch (e) {
     // Not a modern asymmetric token (or JWKS unavailable) — try legacy HS256.
   }
@@ -43,7 +56,7 @@ async function verifyUser(req) {
   if (secret) {
     try {
       const payload = jwt.verify(token, secret, { algorithms: ["HS256"] });
-      return { id: payload.sub, token };
+      return { id: payload.sub, email: (payload.email || "").toLowerCase(), token };
     } catch (e) {
       return null;
     }
@@ -51,96 +64,102 @@ async function verifyUser(req) {
   return null;
 }
 
-// gemini-3.5-flash is Google's current general-purpose default (as of mid-
-// 2026): strong multimodal + agentic quality at a moderate price. Swap to
-// gemini-3.1-flash-lite here for a cheaper, lighter-weight tier if quality
-// is sufficient for your use case — check ai.google.dev/gemini-api/docs
-// for current model names before changing this, Google retires models on
-// a regular cadence.
-const ALLOWED_MODEL = "gemini-3.5-flash";
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${ALLOWED_MODEL}:generateContent`;
-const MAX_OUTPUT_TOKENS_CEILING = 4096;
-const MAX_PARTS = 6;
-const MAX_TEXT_CHARS = 20000; // generous for any prompt this app sends
-const MAX_IMAGE_BASE64_CHARS = 3_000_000; // ~2.2MB raw — well above what the app's own client-side photo compression (1600px, JPEG q0.85) ever produces
-const DAILY_AI_LIMIT_PER_USER = Number(process.env.DAILY_AI_LIMIT_PER_USER) || 30;
-
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const RATE_LIMIT_MAX = 20;
-const hitsByUser = new Map();
-
-function isRateLimited(userId) {
-  const now = Date.now();
-  const hits = (hitsByUser.get(userId) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
-  hits.push(now);
-  hitsByUser.set(userId, hits);
-  return hits.length > RATE_LIMIT_MAX;
+function isAdmin(email) {
+  const list = (process.env.ADMIN_EMAILS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  return email && list.includes(email);
 }
 
-function isAllowedOrigin(req) {
-  const origin = req.headers.origin || "";
-  const referer = req.headers.referer || "";
-  const host = req.headers.host || "";
-  const okHosts = [host, "localhost", "127.0.0.1"];
-  if (!origin && !referer) return false;
-  return okHosts.some(h => h && (origin.includes(h) || referer.includes(h)));
-}
-
-// Validates against Gemini's request shape: { contents: [{ role, parts }],
-// tools?: [{ google_search: {} }] }. Only a single user turn with text
-// and/or one inline image is expected from this app — reject anything
-// wider, which also caps how much a caller could get billed per request.
-function validateBody(body) {
-  if (!body || typeof body !== "object") return "Missing request body";
-  if (!Array.isArray(body.contents) || body.contents.length === 0) return "contents must be a non-empty array";
-  if (body.contents.length > 1) return "Only a single turn is supported";
-  const parts = body.contents[0]?.parts;
-  if (!Array.isArray(parts) || parts.length === 0) return "contents[0].parts must be a non-empty array";
-  if (parts.length > MAX_PARTS) return "Too many parts";
-
-  let textChars = 0;
-  for (const part of parts) {
-    if (typeof part.text === "string") {
-      textChars += part.text.length;
-    } else if (part.inline_data) {
-      const dataLen = (part.inline_data.data || "").length;
-      if (dataLen > MAX_IMAGE_BASE64_CHARS) return "Image too large";
-      if (!part.inline_data.mime_type || !part.inline_data.mime_type.startsWith("image/")) return "Only image inline_data is allowed";
-    } else {
-      return "Unrecognized part shape";
-    }
-  }
-  if (textChars > MAX_TEXT_CHARS) return "Text content too large";
-  if (body.tools) {
-    if (!Array.isArray(body.tools)) return "tools must be an array";
-    for (const t of body.tools) {
-      const keys = Object.keys(t || {});
-      if (keys.length !== 1 || keys[0] !== "google_search") return "Only the google_search tool is allowed";
-    }
-  }
-  return null;
-}
-
-async function checkAndIncrementUsage(supabase, userId) {
+// Persistent once-per-day cap, stored in the database rather than in-memory
+// — an in-memory counter would reset on every serverless cold start and
+// stop being "once per day" in practice. Keyed per admin user, in case
+// there's ever more than one.
+async function checkAndRecordDailyRun(supabase, userId) {
+  const key = `admin-refresh-last:${userId}`;
+  const { data } = await supabase.from("shared_cache").select("value").eq("cache_key", key).maybeSingle();
   const today = new Date().toISOString().slice(0, 10);
-  const { data: existing } = await supabase
-    .from("ai_usage").select("count").eq("user_id", userId).eq("day", today).maybeSingle();
-  const currentCount = existing?.count || 0;
-  if (currentCount >= DAILY_AI_LIMIT_PER_USER) {
-    return { allowed: false, count: currentCount };
-  }
-  await supabase.from("ai_usage").upsert({ user_id: userId, day: today, count: currentCount + 1 });
-  return { allowed: true, count: currentCount + 1 };
+  if (data?.value === today) return false; // already run today
+  await supabase.from("shared_cache").upsert({ cache_key: key, value: today, updated_at: new Date().toISOString() });
+  return true;
+}
+
+function extractJSON(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("No JSON found in AI response");
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+async function callGemini({ prompt, tools, max_tokens = 3072 }) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Server is missing GEMINI_API_KEY");
+  const res = await fetch(GEMINI_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      // See api/gemini.js — without this, thinking tokens can consume the
+      // whole maxOutputTokens budget and leave an empty text response.
+      generationConfig: { maxOutputTokens: max_tokens, thinkingConfig: { thinkingBudget: 0 } },
+      ...(tools ? { tools } : {})
+    })
+  });
+  if (!res.ok) throw new Error(`Gemini API error ${res.status}`);
+  const data = await res.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.filter(p => typeof p.text === "string").map(p => p.text).join("\n");
+  return extractJSON(text);
+}
+
+function contentPrompt(name, category) {
+  return `Research the travel destination "${name}" (category: ${category}) using web search so the information is accurate and current. Then respond with ONLY a single valid JSON object, no markdown fences, no commentary before or after, matching exactly this shape:
+
+{
+ "name": string,
+ "category": string,
+ "tagline": string (under 12 words),
+ "overview": string (3-4 sentences),
+ "history": { "builtBy": string, "yearBuilt": string, "reason": string, "facts": [string, string, string] },
+ "whyFamous": string (2-3 sentences),
+ "location": { "city": string, "state": string, "country": string, "lat": number, "lng": number },
+ "hours": { "today": string, "weekly": [{"day": string, "hours": string}], "closedDays": string },
+ "tickets": { "domestic": string, "foreign": string, "children": string, "senior": string, "special": string },
+ "bestTime": { "season": string, "weather": string, "crowdLevel": string, "sunriseSunset": string },
+ "photoSpots": [string, string, string],
+ "nearbyAttractions": [{"name": string, "distanceKm": number, "travelTimeMin": number, "rating": number}],
+ "nearbyRestaurants": [{"name": string, "cuisine": string, "priceRange": string, "rating": number}],
+ "nearbyHotels": [{"name": string, "tier": string, "distanceKm": number, "rating": number}]
+}`;
+}
+
+function popularDestinationsPrompt() {
+  return `Using web search, name 6 currently popular travel landmarks worth featuring on a travel app's home screen — a mix of globally iconic sites and a couple of places trending right now. Respond with ONLY valid JSON, no markdown fences, no commentary:
+
+{"places": [{"name": string, "category": string (one of: monument, museum, religious site, historical building, other)}]}`;
 }
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
+  // GET is a lightweight "am I admin?" check the UI uses to decide whether
+  // to even show the Refresh Memory button. It reveals nothing except a
+  // boolean for the calling user's own account — the actual refresh action
+  // below (POST) is independently re-verified and gated the same way, so
+  // this endpoint can't be used to grant access, only to ask about it.
+  if (req.method === "GET") {
+    if (!isAllowedOrigin(req)) { res.status(403).json({ error: "Forbidden" }); return; }
+    const user = await verifyUser(req);
+    if (!user) { res.status(401).json({ error: "Sign in required" }); return; }
+    res.status(200).json({ isAdmin: isAdmin(user.email) });
+    return;
+  }
+
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
   }
-
   if (!isAllowedOrigin(req)) {
     res.status(403).json({ error: "Forbidden" });
     return;
@@ -151,60 +170,91 @@ export default async function handler(req, res) {
     res.status(401).json({ error: "Sign in required" });
     return;
   }
-
-  if (isRateLimited(user.id)) {
-    res.status(429).json({ error: "Too many requests, please slow down." });
+  if (!isAdmin(user.email)) {
+    res.status(403).json({ error: "This action is limited to the app admin." });
     return;
   }
 
-  const validationError = validateBody(req.body);
-  if (validationError) {
-    res.status(400).json({ error: validationError });
+  const url = process.env.VITE_SUPABASE_URL;
+  const anonKey = process.env.VITE_SUPABASE_ANON_KEY;
+  if (!url || !anonKey) {
+    res.status(500).json({ error: "Server is missing Supabase configuration" });
+    return;
+  }
+  // Acts as the calling (admin) user — shared_cache policies already allow
+  // any authenticated user to read/write it, so no elevated service-role
+  // credential is needed here.
+  const supabase = createClient(url, anonKey, { global: { headers: { Authorization: `Bearer ${user.token}` } } });
+
+  const canRunToday = await checkAndRecordDailyRun(supabase, user.id);
+  if (!canRunToday) {
+    res.status(429).json({ error: "Refresh Memory can only be run once per day — already run today. Try again tomorrow." });
     return;
   }
 
-  const supabaseUrl = process.env.VITE_SUPABASE_URL;
-  const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
-  if (supabaseUrl && supabaseAnonKey) {
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: `Bearer ${user.token}` } }
-    });
-    const usage = await checkAndIncrementUsage(supabase, user.id);
-    if (!usage.allowed) {
-      res.status(429).json({
-        error: `Daily AI usage limit reached (${DAILY_AI_LIMIT_PER_USER}/day). This resets at midnight UTC — most repeat views of the same place don't count against it, since those are served from cache.`
-      });
-      return;
-    }
-  }
+  const result = { popularRefreshed: false, placesRefreshed: 0, placesStillStale: 0, errors: [] };
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    res.status(500).json({ error: "Server is missing GEMINI_API_KEY. Set it in your Vercel project's Environment Variables." });
-    return;
-  }
-
-  const safeBody = {
-    contents: req.body.contents,
-    generationConfig: {
-      maxOutputTokens: Math.min(Number(req.body.maxOutputTokens) || 2048, MAX_OUTPUT_TOKENS_CEILING)
-    },
-    ...(req.body.tools ? { tools: req.body.tools } : {})
-  };
-
+  // Task 1: regenerate the "Popular destinations" home-screen list —
+  // this is the "new places" half of the request.
   try {
-    const upstream = await fetch(GEMINI_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey
-      },
-      body: JSON.stringify(safeBody)
+    const popularData = await callGemini({
+      prompt: popularDestinationsPrompt(),
+      tools: [{ google_search: {} }],
+      max_tokens: 1024
     });
-
-    const data = await upstream.json();
-    res.status(upstream.status).json(data);
-  } catch (err) {
-    res.status(502).json({ error: "Upstream request failed" });
+    await supabase.from("shared_cache").upsert({
+      cache_key: "popular-destinations",
+      value: JSON.stringify(popularData),
+      updated_at: new Date().toISOString()
+    });
+    result.popularRefreshed = true;
+  } catch (e) {
+    result.errors.push("Popular destinations: " + e.message);
   }
+
+  // Task 2: refresh the stalest existing place guides — the "updated
+  // information of places" half of the request. Only "place:<slug>" keys,
+  // not "place:<slug>:<lang>" translation entries.
+  try {
+    const { data: staleRows } = await supabase
+      .from("shared_cache")
+      .select("cache_key, value, updated_at")
+      .like("cache_key", "place:%")
+      .not("cache_key", "like", "place:%:%")
+      .order("updated_at", { ascending: true })
+      .limit(PLACE_REFRESH_BATCH);
+
+    for (const row of staleRows || []) {
+      try {
+        const parsed = JSON.parse(row.value);
+        const name = parsed?.data?.name;
+        const category = parsed?.data?.category || "landmark";
+        if (!name) continue;
+        const freshData = await callGemini({
+          prompt: contentPrompt(name, category),
+          tools: [{ google_search: {} }],
+          max_tokens: 4096
+        });
+        await supabase.from("shared_cache").upsert({
+          cache_key: row.cache_key,
+          value: JSON.stringify({ data: freshData, syncedAt: new Date().toISOString() }),
+          updated_at: new Date().toISOString()
+        });
+        result.placesRefreshed++;
+      } catch (e) {
+        result.errors.push(`${row.cache_key}: ${e.message}`);
+      }
+    }
+
+    const { count } = await supabase
+      .from("shared_cache")
+      .select("cache_key", { count: "exact", head: true })
+      .like("cache_key", "place:%")
+      .not("cache_key", "like", "place:%:%");
+    result.placesStillStale = Math.max(0, (count || 0) - result.placesRefreshed);
+  } catch (e) {
+    result.errors.push("Place refresh batch: " + e.message);
+  }
+
+  res.status(200).json(result);
 }

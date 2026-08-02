@@ -1,104 +1,42 @@
-#!/usr/bin/env bash
-#
-# Security check for a deployed Travel Buddy instance.
-# Tests that the live endpoints actually REJECT what they should reject —
-# not just that they exist. Run this after every deploy, and anytime you
-# change api/gemini.js, api/refresh-memory.js, or vercel.json.
-#
-# Usage: ./scripts/security-check.sh https://your-app.vercel.app
+import React from "react";
 
-set -u
-BASE="${1:-}"
-if [ -z "$BASE" ]; then
-  echo "Usage: $0 https://your-app.vercel.app"
-  exit 1
-fi
-BASE="${BASE%/}"
+const theme = { bg: "#241B10", ink: "#F5E9CD", inkMuted: "#C2AD84", gold: "#E85B3B", stage: "#150F09" };
 
-PASS=0
-FAIL=0
+export default class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
 
-check() {
-  local desc="$1" expected="$2" actual="$3"
-  if [ "$actual" = "$expected" ]; then
-    echo "  PASS  $desc (got $actual)"
-    PASS=$((PASS+1))
-  else
-    echo "  FAIL  $desc (expected $expected, got $actual)"
-    FAIL=$((FAIL+1))
-  fi
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, info) {
+    // In a real production app, send this to an error-tracking service
+    // (e.g. Sentry) instead of just the console. See README "Monitoring".
+    console.error("Travel Buddy crashed:", error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          minHeight: "100vh", background: theme.stage, display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center", fontFamily: "sans-serif"
+        }}>
+          <p style={{ fontSize: 40, marginBottom: 8 }}>🧭</p>
+          <p style={{ color: theme.ink, fontSize: 17, fontWeight: 700, margin: "0 0 6px" }}>Something went wrong</p>
+          <p style={{ color: theme.inkMuted, fontSize: 13, margin: "0 0 20px", maxWidth: 320, lineHeight: 1.6 }}>
+            Travel Buddy hit an unexpected error. Reloading usually fixes it — your saved places are safe in your account.
+          </p>
+          <button onClick={() => window.location.reload()} style={{
+            background: theme.gold, border: "none", borderRadius: 999, padding: "10px 22px",
+            color: theme.stage, fontWeight: 700, fontSize: 13, cursor: "pointer"
+          }}>Reload</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
-
-echo "== Travel Buddy security check: $BASE =="
-echo
-
-echo "-- Security headers on the main page --"
-HEADERS=$(curl -s -D - -o /dev/null "$BASE/")
-for h in "content-security-policy" "x-frame-options" "x-content-type-options" "strict-transport-security" "permissions-policy"; do
-  if echo "$HEADERS" | grep -qi "^$h:"; then
-    echo "  PASS  $h header present"
-    PASS=$((PASS+1))
-  else
-    echo "  FAIL  $h header MISSING"
-    FAIL=$((FAIL+1))
-  fi
-done
-echo
-
-echo "-- /api/gemini: unauthenticated / malformed requests should be rejected --"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/gemini")
-check "GET (wrong method) -> 405" "405" "$CODE"
-
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
-  -H "Content-Type: application/json" -H "Origin: $BASE" \
-  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
-check "POST with no auth token -> 401" "401" "$CODE"
-
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
-  -H "Content-Type: application/json" -H "Origin: $BASE" \
-  -H "Authorization: Bearer not-a-real-token" \
-  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
-check "POST with forged/garbage token -> 401" "401" "$CODE"
-
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
-  -H "Content-Type: application/json" -H "Origin: https://some-other-site.example" \
-  -H "Authorization: Bearer not-a-real-token" \
-  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
-check "POST from a different Origin -> 403 or 401" "403" "$CODE"
-echo "        (401 is also acceptable here — either means it was rejected before reaching the AI)"
-echo
-
-echo "-- /api/refresh-memory: same checks, plus admin gating --"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/refresh-memory" \
-  -H "Origin: $BASE")
-check "POST with no auth token -> 401" "401" "$CODE"
-
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/refresh-memory" \
-  -H "Origin: $BASE")
-check "GET with no auth token -> 401" "401" "$CODE"
-echo "        (Full admin-gating and once-per-day checks need a REAL logged-in token to test —"
-echo "         see the manual step below.)"
-echo
-
-echo "-- /api/admin-stats: same checks (this one uses the service role key, so it's critical it's locked down) --"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/admin-stats" \
-  -H "Origin: $BASE")
-check "GET with no auth token -> 401" "401" "$CODE"
-
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/admin-stats" \
-  -H "Origin: $BASE")
-check "POST (wrong method) -> 405" "405" "$CODE"
-echo
-
-echo "-- Sensitive files should not be served --"
-for path in ".env" ".env.local" "supabase/schema.sql" "package.json"; do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$path")
-  check "$path -> 404 (not served)" "404" "$CODE"
-done
-echo
-
-echo "== $PASS passed, $FAIL failed =="
-if [ "$FAIL" -gt 0 ]; then
-  echo "Review the FAILs above before treating this deployment as production-ready."
-  exit 1
-fi
