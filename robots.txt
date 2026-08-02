@@ -187,15 +187,7 @@ export default async function handler(req, res) {
   const safeBody = {
     contents: req.body.contents,
     generationConfig: {
-      maxOutputTokens: Math.min(Number(req.body.maxOutputTokens) || 2048, MAX_OUTPUT_TOKENS_CEILING),
-      // Gemini 3.5's "thinking" is on by default (medium), and those
-      // invisible reasoning tokens are deducted from the SAME budget as
-      // maxOutputTokens — a low output cap can get entirely consumed by
-      // thinking, leaving no room for the actual answer. This app just
-      // needs structured JSON out, not deep reasoning, so thinking is
-      // pinned low server-side rather than left to the client or Gemini's
-      // default.
-      thinkingConfig: { thinkingLevel: "low" }
+      maxOutputTokens: Math.min(Number(req.body.maxOutputTokens) || 2048, MAX_OUTPUT_TOKENS_CEILING)
     },
     ...(req.body.tools ? { tools: req.body.tools } : {})
   };

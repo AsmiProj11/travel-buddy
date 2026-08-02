@@ -100,7 +100,7 @@ async function callGemini({ prompt, tools, max_tokens = 3072 }) {
     },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: max_tokens, thinkingConfig: { thinkingLevel: "low" } },
+      generationConfig: { maxOutputTokens: max_tokens },
       ...(tools ? { tools } : {})
     })
   });
