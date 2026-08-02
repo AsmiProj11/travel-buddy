@@ -12,6 +12,7 @@
 // listed in ADMIN_EMAILS.
 
 import jwt from "jsonwebtoken";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createClient } from "@supabase/supabase-js";
 
 const MODEL = "claude-sonnet-4-6";
@@ -25,18 +26,41 @@ function isAllowedOrigin(req) {
   return okHosts.some(h => h && (origin.includes(h) || referer.includes(h)));
 }
 
-function verifyUser(req) {
+let jwks = null;
+function getJWKS() {
+  if (!jwks) {
+    const url = process.env.VITE_SUPABASE_URL;
+    jwks = createRemoteJWKSet(new URL(`${url}/auth/v1/.well-known/jwks.json`));
+  }
+  return jwks;
+}
+
+// Supabase projects created after mid-2025 sign login tokens with a modern
+// asymmetric key (ES256) by default, verified via a public JWKS endpoint —
+// not the older shared secret. This tries the modern path first and falls
+// back to the legacy HS256 shared-secret scheme for older projects.
+async function verifyUser(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!token) return null;
-  const secret = process.env.SUPABASE_JWT_SECRET;
-  if (!secret) return null;
+
   try {
-    const payload = jwt.verify(token, secret, { algorithms: ["HS256"] });
+    const { payload } = await jwtVerify(token, getJWKS());
     return { id: payload.sub, email: (payload.email || "").toLowerCase(), token };
   } catch (e) {
-    return null;
+    // Not a modern asymmetric token (or JWKS unavailable) — try legacy HS256.
   }
+
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  if (secret) {
+    try {
+      const payload = jwt.verify(token, secret, { algorithms: ["HS256"] });
+      return { id: payload.sub, email: (payload.email || "").toLowerCase(), token };
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
 }
 
 function isAdmin(email) {
@@ -124,7 +148,7 @@ export default async function handler(req, res) {
   // this endpoint can't be used to grant access, only to ask about it.
   if (req.method === "GET") {
     if (!isAllowedOrigin(req)) { res.status(403).json({ error: "Forbidden" }); return; }
-    const user = verifyUser(req);
+    const user = await verifyUser(req);
     if (!user) { res.status(401).json({ error: "Sign in required" }); return; }
     res.status(200).json({ isAdmin: isAdmin(user.email) });
     return;
@@ -139,7 +163,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const user = verifyUser(req);
+  const user = await verifyUser(req);
   if (!user) {
     res.status(401).json({ error: "Sign in required" });
     return;

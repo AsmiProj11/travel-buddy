@@ -13,6 +13,7 @@ export default function LoginScreen() {
   const [mode, setMode] = useState("signin"); // signin | signup
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
@@ -27,6 +28,10 @@ export default function LoginScreen() {
     }
     if (password.length < 6) {
       setError("Password must be at least 6 characters.");
+      return;
+    }
+    if (mode === "signup" && password !== confirmPassword) {
+      setError("Passwords don't match.");
       return;
     }
     setLoading(true);
@@ -84,6 +89,13 @@ export default function LoginScreen() {
             <input type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
               style={{ flex: 1, background: "none", border: "none", outline: "none", color: theme.ink, fontSize: 13.5, fontFamily: "'Inter', sans-serif" }} />
           </label>
+          {mode === "signup" && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
+              <Lock size={15} color={theme.inkMuted} />
+              <input type="password" autoComplete="new-password" placeholder="Confirm password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
+                style={{ flex: 1, background: "none", border: "none", outline: "none", color: theme.ink, fontSize: 13.5, fontFamily: "'Inter', sans-serif" }} />
+            </label>
+          )}
 
           {error && <p style={{ fontSize: 12, color: theme.danger, margin: "0 0 12px" }}>{error}</p>}
           {message && <p style={{ fontSize: 12, color: theme.teal, margin: "0 0 12px" }}>{message}</p>}
@@ -102,7 +114,7 @@ export default function LoginScreen() {
 
         <p style={{ textAlign: "center", fontSize: 12.5, color: theme.inkMuted, marginTop: 18 }}>
           {mode === "signin" ? "New to Travel Buddy?" : "Already have an account?"}{" "}
-          <button onClick={() => { setMode(m => m === "signin" ? "signup" : "signin"); setError(null); setMessage(null); }}
+          <button onClick={() => { setMode(m => m === "signin" ? "signup" : "signin"); setError(null); setMessage(null); setConfirmPassword(""); }}
             style={{ background: "none", border: "none", color: theme.gold, fontWeight: 700, cursor: "pointer", fontSize: 12.5, padding: 0 }}>
             {mode === "signin" ? "Create an account" : "Sign in"}
           </button>
