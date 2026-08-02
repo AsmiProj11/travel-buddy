@@ -211,6 +211,17 @@ export default async function handler(req, res) {
     });
 
     const data = await upstream.json();
+    if (!upstream.ok) {
+      // Gemini's error shape is { error: { code, message, status } } — an
+      // object, not a string. Forwarding it as-is means the frontend's
+      // `new Error(errBody.error)` stringifies an object into the
+      // literal text "[object Object]". Normalize to a plain string here
+      // so every caller of this endpoint can rely on `error` always being
+      // readable text.
+      const message = (data && data.error && (data.error.message || data.error)) || `Upstream error (${upstream.status})`;
+      res.status(upstream.status).json({ error: typeof message === "string" ? message : `Upstream error (${upstream.status})` });
+      return;
+    }
     res.status(upstream.status).json(data);
   } catch (err) {
     res.status(502).json({ error: "Upstream request failed" });

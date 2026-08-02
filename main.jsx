@@ -109,7 +109,12 @@ async function callGemini({ text, image, tools, max_tokens = 2048 }) {
   });
   if (!res.ok) {
     let message = `The AI service returned an error (${res.status})`;
-    try { const errBody = await res.json(); if (errBody?.error) message = errBody.error; } catch (e) {}
+    try {
+      const errBody = await res.json();
+      const raw = errBody?.error;
+      if (typeof raw === "string" && raw) message = raw;
+      else if (raw && typeof raw === "object" && typeof raw.message === "string") message = raw.message;
+    } catch (e) {}
     throw new Error(message);
   }
   const data = await res.json();
