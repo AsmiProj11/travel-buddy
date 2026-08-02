@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
+import { Analytics } from "@vercel/analytics/react";
 import App from "./App.jsx";
 import LoginScreen from "./LoginScreen.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
@@ -86,6 +87,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <ErrorBoundary>
       <Root />
+      <Analytics />
     </ErrorBoundary>
   </React.StrictMode>
 );

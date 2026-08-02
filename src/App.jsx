@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient.js";
 import LegalScreen from "./LegalScreen.jsx";
+import AdminDashboard from "./AdminDashboard.jsx";
 import {
   Camera, Image as ImageIcon, Search, MapPin, Clock, Ticket, Volume2,
   VolumeX, Star, Utensils, Building2, ShieldCheck, Sparkles, Route,
@@ -88,18 +89,21 @@ function extractJSON(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function callClaude({ messages, tools, max_tokens = 2048 }) {
+async function callGemini({ text, image, tools, max_tokens = 2048 }) {
   const { data: { session } } = await supabase.auth.getSession();
-  const res = await fetch("/api/claude", {
+  const parts = [];
+  if (image) parts.push({ inline_data: { mime_type: image.mediaType, data: image.data } });
+  parts.push({ text });
+
+  const res = await fetch("/api/gemini", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {})
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens,
-      messages,
+      contents: [{ role: "user", parts }],
+      maxOutputTokens: max_tokens,
       ...(tools ? { tools } : {})
     })
   });
@@ -109,7 +113,8 @@ async function callClaude({ messages, tools, max_tokens = 2048 }) {
     throw new Error(message);
   }
   const data = await res.json();
-  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+  const candidateParts = data?.candidates?.[0]?.content?.parts || [];
+  return candidateParts.filter(p => typeof p.text === "string").map(p => p.text).join("\n");
 }
 
 const IDENTIFY_PROMPT = `You are the vision engine for a travel guide app. Look at this photo and identify the single most prominent travel-relevant subject: a landmark, monument, museum, temple, church, restaurant dish, mountain, beach, waterfall, animal, flower, or artwork.
@@ -539,9 +544,9 @@ export default function App({ session, onLogout }) {
         syncedAt = cachedEntry.syncedAt;
         fromCache = true;
       } else {
-        const text = await callClaude({
-          messages: [{ role: "user", content: contentPrompt(name, category) }],
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
+        const text = await callGemini({
+          text: contentPrompt(name, category),
+          tools: [{ google_search: {} }],
           max_tokens: 4096
         });
         data = extractJSON(text);
@@ -658,14 +663,9 @@ export default function App({ session, onLogout }) {
     try {
       const b64 = await fileToBase64(file);
       setCapturedImage(`data:image/jpeg;base64,${b64}`);
-      const text = await callClaude({
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } },
-            { type: "text", text: IDENTIFY_PROMPT }
-          ]
-        }],
+      const text = await callGemini({
+        text: IDENTIFY_PROMPT,
+        image: { mediaType: "image/jpeg", data: b64 },
         max_tokens: 300
       });
       const guess = extractJSON(text);
@@ -692,8 +692,8 @@ export default function App({ session, onLogout }) {
       if (cached && daysAgo(cached.syncedAt) < 30) {
         setDisplayPlace(cached.data);
       } else {
-        const text = await callClaude({
-          messages: [{ role: "user", content: translatePrompt(place, langLabel) }],
+        const text = await callGemini({
+          text: translatePrompt(place, langLabel),
           max_tokens: 4096
         });
         const translated = extractJSON(text);
@@ -834,6 +834,7 @@ export default function App({ session, onLogout }) {
               email={session?.user?.email} onLogout={onLogout}
               onOpenLegal={() => setTab("legal")}
               onRefreshMemory={refreshMemory} refreshingMemory={refreshingMemory} refreshResult={refreshResult} isAdmin={isAdmin}
+              onOpenAdmin={() => setTab("admin")}
               onToggleAlerts={(v) => {
                 if (v && notifPermission !== "granted") { requestNotifPermission(); return; }
                 persistAlertsEnabled(v);
@@ -842,6 +843,8 @@ export default function App({ session, onLogout }) {
           )}
 
           {tab === "legal" && <LegalScreen theme={theme} onBack={() => setTab("profile")} />}
+
+          {tab === "admin" && <AdminDashboard theme={theme} onBack={() => setTab("profile")} />}
         </div>
 
         <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
@@ -1448,7 +1451,7 @@ function RadarScreen({ theme, myLocation, locationStatus, nearbyPOIs, areaName, 
   );
 }
 
-function ProfileScreen({ theme, mode, setMode, savedCount, alertsEnabled, notifPermission, onRequestPermission, onToggleAlerts, email, onLogout, onOpenLegal, onRefreshMemory, refreshingMemory, refreshResult, isAdmin }) {
+function ProfileScreen({ theme, mode, setMode, savedCount, alertsEnabled, notifPermission, onRequestPermission, onToggleAlerts, email, onLogout, onOpenLegal, onRefreshMemory, refreshingMemory, refreshResult, isAdmin, onOpenAdmin }) {
   return (
     <div>
       <p style={{ fontFamily: "var(--font-display)", fontSize: 26, fontWeight: 700, color: theme.ink, margin: "0 0 4px" }}>Profile</p>
@@ -1505,6 +1508,19 @@ function ProfileScreen({ theme, mode, setMode, savedCount, alertsEnabled, notifP
         </div>
       )}
 
+      {isAdmin && (
+        <button onClick={onOpenAdmin} style={{
+          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left",
+          background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 14, padding: "14px 16px",
+          marginBottom: 12, cursor: "pointer"
+        }}>
+          <span style={{ fontSize: 13, color: theme.ink }}>
+            Admin Dashboard <span style={{ fontSize: 9, color: theme.gold, fontFamily: "var(--font-mono)", border: `1px solid ${theme.gold}`, borderRadius: 4, padding: "1px 4px", marginLeft: 4 }}>ADMIN</span>
+          </span>
+          <span style={{ fontSize: 11, color: theme.inkMuted }}>Users · usage · popular places →</span>
+        </button>
+      )}
+
       <div style={{ background: theme.surface, border: `2px dashed ${theme.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 13, color: theme.ink }}>Appearance</span>
@@ -1556,7 +1572,7 @@ function BottomNav({ theme, tab, setTab }) {
     <div style={{ display: "flex", borderTop: `2.5px dashed ${theme.border}`, background: theme.surface }}>
       {items.map(it => {
         const Icon = it.icon;
-        const active = tab === it.id || (tab === "results" && it.id === "camera") || (tab === "radar" && it.id === "home") || (tab === "legal" && it.id === "profile");
+        const active = tab === it.id || (tab === "results" && it.id === "camera") || (tab === "radar" && it.id === "home") || (tab === "legal" && it.id === "profile") || (tab === "admin" && it.id === "profile");
         return (
           <button key={it.id} onClick={() => setTab(it.id)} style={{
             flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
