@@ -1,114 +1,93 @@
-# Go-Live Checklist
+import React, { useEffect, useState } from "react";
+import ReactDOM from "react-dom/client";
+import { Analytics } from "@vercel/analytics/react";
+import App from "./App.jsx";
+import LoginScreen from "./LoginScreen.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
+import { supabase } from "./lib/supabaseClient.js";
 
-Everything here that's a code/config change is already done in this project.
-What's left is account setup and dashboard toggles that only you can do,
-since they need your own logins. Go in order — each phase depends on the
-last.
+// window.storage shim, backed by Supabase Postgres instead of localStorage.
+// Personal data (shared=false) is scoped to the signed-in user via
+// `user_data`, protected by Row Level Security (see supabase/schema.sql) —
+// each user can only read/write their own rows, enforced by the database
+// itself, not just app logic. Shared data (shared=true) — cached
+// AI-generated guides and nearby-radar results — lives in `shared_cache`,
+// reused across everyone.
+async function currentUserId() {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user?.id || null;
+}
 
----
+window.storage = {
+  async get(key, shared = false) {
+    if (shared) {
+      const { data } = await supabase.from("shared_cache").select("value").eq("cache_key", key).maybeSingle();
+      return data ? { key, value: data.value, shared } : null;
+    }
+    const uid = await currentUserId();
+    if (!uid) return null;
+    const { data } = await supabase.from("user_data").select("value").eq("user_id", uid).eq("data_key", key).maybeSingle();
+    return data ? { key, value: data.value, shared } : null;
+  },
+  async set(key, value, shared = false) {
+    if (shared) {
+      await supabase.from("shared_cache").upsert({ cache_key: key, value, updated_at: new Date().toISOString() });
+      return { key, value, shared };
+    }
+    const uid = await currentUserId();
+    if (!uid) return null;
+    await supabase.from("user_data").upsert({ user_id: uid, data_key: key, value, updated_at: new Date().toISOString() });
+    return { key, value, shared };
+  },
+  async delete(key, shared = false) {
+    if (shared) {
+      await supabase.from("shared_cache").delete().eq("cache_key", key);
+      return { key, deleted: true, shared };
+    }
+    const uid = await currentUserId();
+    if (!uid) return { key, deleted: false, shared };
+    await supabase.from("user_data").delete().eq("user_id", uid).eq("data_key", key);
+    return { key, deleted: true, shared };
+  },
+  async list(prefix = "", shared = false) {
+    if (shared) {
+      const { data } = await supabase.from("shared_cache").select("cache_key").like("cache_key", `${prefix}%`);
+      return { keys: (data || []).map(r => r.cache_key), prefix, shared };
+    }
+    const uid = await currentUserId();
+    if (!uid) return { keys: [], prefix, shared };
+    const { data } = await supabase.from("user_data").select("data_key").eq("user_id", uid).like("data_key", `${prefix}%`);
+    return { keys: (data || []).map(r => r.data_key), prefix, shared };
+  }
+};
 
-## Phase 1 — Accounts (~15 min)
+function LoadingScreen() {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#150F09", color: "#C2AD84", fontFamily: "sans-serif", fontSize: 13 }}>
+      Loading…
+    </div>
+  );
+}
 
-- [ ] **GitHub** account — free, github.com
-- [ ] **Vercel** account — free, sign up with your GitHub account (simplest)
-- [ ] **Supabase** account — free, supabase.com
-- [ ] **Google AI Studio** account — aistudio.google.com, get a Gemini API
-      key (usage is pay-as-you-go past the free tier, no monthly minimum)
+function Root() {
+  const [session, setSession] = useState(undefined); // undefined = still checking
 
-## Phase 2 — Supabase project (~10 min)
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
-- [ ] Create a new Supabase project. Pick a region close to where most of
-      your users will be (lower latency).
-- [ ] **SQL Editor → New query** → paste and run `supabase/schema.sql`.
-- [ ] **Authentication → Providers → Email**:
-  - For testing: turn OFF "Confirm email" so you can log in immediately.
-  - Before real users: turn it back ON.
-- [ ] **Authentication → Policies**: confirm `user_data` and `shared_cache`
-      both show "RLS enabled" with the policies from the schema file. This
-      is the thing that actually keeps one user's data private from another
-      — don't skip verifying it.
-- [ ] **Authentication → Settings → Password requirements**: Supabase has a
-      built-in "leaked password protection" toggle (checks new passwords
-      against known breach databases) — turn it on.
-- [ ] **Project Settings → API**: copy the three values you'll need next —
-      Project URL, anon/public key, JWT Secret.
-- [ ] **Project Settings → General**: set your Site URL to your future
-      Vercel URL once you have it (Phase 3) — this matters for auth email
-      links (password reset, confirmation) to point to the right place.
+  if (session === undefined) return <LoadingScreen />;
+  if (!session) return <LoginScreen />;
+  return <App session={session} onLogout={() => supabase.auth.signOut()} />;
+}
 
-## Phase 3 — Deploy (~10 min)
-
-- [ ] Push this project to a GitHub repo.
-- [ ] Import it in Vercel, add all seven environment variables
-      (`GEMINI_API_KEY`, `SUPABASE_JWT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`,
-      `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `ADMIN_EMAILS`,
-      `DAILY_AI_LIMIT_PER_USER`) — see `.env.example` for where each comes
-      from. Handle `SUPABASE_SERVICE_ROLE_KEY` with real care — it bypasses
-      every privacy rule in the database.
-- [ ] Deploy. Go back to Supabase → Project Settings → General → set Site
-      URL to the real `https://your-app.vercel.app` URL.
-- [ ] Open the deployed URL, create an account, confirm login → save a
-      place → Roam Radar → nearby alert all work end to end.
-- [ ] Run `./scripts/security-check.sh https://your-app.vercel.app` — it
-      should report 0 failures. See `SECURITY_TESTING.md` for the manual
-      follow-up tests (admin gating, the daily cap) it can't run by itself.
-
-## Phase 4 — Spend & abuse protection (~5 min)
-
-- [ ] **Google Cloud Console → Billing → Budgets & alerts**: set a
-      monthly spend cap/alert on the project tied to your Gemini API key.
-      This is your real financial backstop — the app's own rate limiter is
-      a speed bump, not a guarantee.
-- [ ] Check Google AI Studio's current free-tier daily request limits — if
-      you're relying on the free tier, know where that ceiling is.
-
-## Phase 5 — Monitoring (~10 min, optional but recommended)
-
-- [ ] **Vercel → your project → Analytics** — free tier gives you basic
-      traffic numbers with one click, no code change needed.
-- [ ] **Error tracking**: for anything beyond a hobby project, add
-      [Sentry](https://sentry.io) (free tier). Quick version:
-      `npm install @sentry/react`, initialize it in `src/main.jsx`, and
-      call `Sentry.captureException(error)` inside
-      `ErrorBoundary.componentDidCatch`. This turns "something broke for a
-      user and I never knew" into an actual alert.
-- [ ] **Supabase → Logs**: skim the Auth and Postgres logs after your first
-      real users show up — it's where you'll notice failed logins, RLS
-      denials, or unexpected query patterns.
-
-## Phase 6 — Legal basics (~30 min, before real strangers use it)
-
-- [ ] The app now has a Privacy Policy & Terms screen (Profile → Privacy
-      Policy & Terms) — **it's a placeholder**. Replace the text in
-      `src/LegalScreen.jsx` with your actual policy. If you're not sure
-      what to put, a free generator like termly.io or a similar privacy
-      policy generator gets you a reasonable starting point — but for
-      anything beyond a personal prototype, have an actual lawyer review
-      it, especially the data you collect (email, location, photos) and
-      which third parties process it (Google's Gemini API, Supabase, Vercel).
-- [ ] If you'll have users in the EU, look into GDPR basics (right to
-      deletion — you'd delete their `auth.users` row and their `user_data`
-      rows; right to export — a simple `select * from user_data where
-      user_id = ...`).
-- [ ] Add a support/contact email somewhere in the app if you expect real
-      users, so people have a way to reach you.
-
-## Phase 7 — Custom domain (optional, ~15 min)
-
-- [ ] Buy a domain (Namecheap, Google Domains, etc.) if "yourapp.vercel.app"
-      isn't the vibe you want.
-- [ ] Vercel → your project → Settings → Domains → add it, follow the DNS
-      instructions Vercel gives you.
-- [ ] Update Supabase's Site URL (Phase 2) to the new domain.
-
----
-
-## What "professional" means here, honestly
-
-This setup gives you: real auth, a real database with enforced per-user
-privacy, a locked-down API, crash resilience, and the account-side
-protections above. What it does *not* give you, if you're picturing scaling
-past personal/small-group use: a CDN-level rate limiter (Vercel's Pro plan
-or a service like Cloudflare adds this), or a dedicated support/moderation
-workflow. Those are real next steps, not gaps in what's built — just beyond
-what a solo/small-team prototype typically needs on day one.
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <Root />
+      <Analytics />
+    </ErrorBoundary>
+  </React.StrictMode>
+);
