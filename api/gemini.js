@@ -61,7 +61,8 @@ const ALLOWED_MODEL = "gemini-3.5-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${ALLOWED_MODEL}:generateContent`;
 const MAX_OUTPUT_TOKENS_CEILING = 4096;
 const MAX_PARTS = 6;
-const MAX_CONTENT_CHARS = 20000;
+const MAX_TEXT_CHARS = 20000; // generous for any prompt this app sends
+const MAX_IMAGE_BASE64_CHARS = 3_000_000; // ~2.2MB raw — well above what the app's own client-side photo compression (1600px, JPEG q0.85) ever produces
 const DAILY_AI_LIMIT_PER_USER = Number(process.env.DAILY_AI_LIMIT_PER_USER) || 30;
 
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -96,8 +97,20 @@ function validateBody(body) {
   const parts = body.contents[0]?.parts;
   if (!Array.isArray(parts) || parts.length === 0) return "contents[0].parts must be a non-empty array";
   if (parts.length > MAX_PARTS) return "Too many parts";
-  const totalChars = JSON.stringify(parts).length;
-  if (totalChars > MAX_CONTENT_CHARS) return "Content too large";
+
+  let textChars = 0;
+  for (const part of parts) {
+    if (typeof part.text === "string") {
+      textChars += part.text.length;
+    } else if (part.inline_data) {
+      const dataLen = (part.inline_data.data || "").length;
+      if (dataLen > MAX_IMAGE_BASE64_CHARS) return "Image too large";
+      if (!part.inline_data.mime_type || !part.inline_data.mime_type.startsWith("image/")) return "Only image inline_data is allowed";
+    } else {
+      return "Unrecognized part shape";
+    }
+  }
+  if (textChars > MAX_TEXT_CHARS) return "Text content too large";
   if (body.tools) {
     if (!Array.isArray(body.tools)) return "tools must be an array";
     for (const t of body.tools) {
