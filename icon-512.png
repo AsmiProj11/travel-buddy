@@ -100,7 +100,9 @@ async function callGemini({ prompt, tools, max_tokens = 3072 }) {
     },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: max_tokens },
+      // See api/gemini.js — without this, thinking tokens can consume the
+      // whole maxOutputTokens budget and leave an empty text response.
+      generationConfig: { maxOutputTokens: max_tokens, thinkingConfig: { thinkingBudget: 0 } },
       ...(tools ? { tools } : {})
     })
   });
