@@ -12,8 +12,8 @@ last.
 - [ ] **GitHub** account — free, github.com
 - [ ] **Vercel** account — free, sign up with your GitHub account (simplest)
 - [ ] **Supabase** account — free, supabase.com
-- [ ] **Anthropic** account — console.anthropic.com, add a payment method
-      (usage is pay-as-you-go, no monthly minimum)
+- [ ] **Google AI Studio** account — aistudio.google.com, get a Gemini API
+      key (usage is pay-as-you-go past the free tier, no monthly minimum)
 
 ## Phase 2 — Supabase project (~10 min)
 
@@ -39,10 +39,12 @@ last.
 ## Phase 3 — Deploy (~10 min)
 
 - [ ] Push this project to a GitHub repo.
-- [ ] Import it in Vercel, add all six environment variables
-      (`ANTHROPIC_API_KEY`, `SUPABASE_JWT_SECRET`, `VITE_SUPABASE_URL`,
-      `VITE_SUPABASE_ANON_KEY`, `ADMIN_EMAILS`, `DAILY_AI_LIMIT_PER_USER`) —
-      see `.env.example` for where each comes from.
+- [ ] Import it in Vercel, add all seven environment variables
+      (`GEMINI_API_KEY`, `SUPABASE_JWT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`,
+      `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `ADMIN_EMAILS`,
+      `DAILY_AI_LIMIT_PER_USER`) — see `.env.example` for where each comes
+      from. Handle `SUPABASE_SERVICE_ROLE_KEY` with real care — it bypasses
+      every privacy rule in the database.
 - [ ] Deploy. Go back to Supabase → Project Settings → General → set Site
       URL to the real `https://your-app.vercel.app` URL.
 - [ ] Open the deployed URL, create an account, confirm login → save a
@@ -53,13 +55,12 @@ last.
 
 ## Phase 4 — Spend & abuse protection (~5 min)
 
-- [ ] **console.anthropic.com → Settings → Limits**: set a monthly spend
-      cap. This is your real financial backstop — the app's own rate
-      limiter is a speed bump, not a guarantee.
-- [ ] **console.anthropic.com → Settings → Limits**: optionally also set a
-      daily cap, so a spike gets caught within a day rather than a month.
-- [ ] Consider Anthropic's usage alerts/email notifications if available in
-      your console, so you hear about a spend spike immediately.
+- [ ] **Google Cloud Console → Billing → Budgets & alerts**: set a
+      monthly spend cap/alert on the project tied to your Gemini API key.
+      This is your real financial backstop — the app's own rate limiter is
+      a speed bump, not a guarantee.
+- [ ] Check Google AI Studio's current free-tier daily request limits — if
+      you're relying on the free tier, know where that ceiling is.
 
 ## Phase 5 — Monitoring (~10 min, optional but recommended)
 
@@ -84,7 +85,7 @@ last.
       policy generator gets you a reasonable starting point — but for
       anything beyond a personal prototype, have an actual lawyer review
       it, especially the data you collect (email, location, photos) and
-      which third parties process it (Anthropic, Supabase, Vercel).
+      which third parties process it (Google's Gemini API, Supabase, Vercel).
 - [ ] If you'll have users in the EU, look into GDPR basics (right to
       deletion — you'd delete their `auth.users` row and their `user_data`
       rows; right to export — a simple `select * from user_data where

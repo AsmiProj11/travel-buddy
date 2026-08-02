@@ -10,9 +10,11 @@ what's nearby, get notified when you're near a saved place.
 - A free [Supabase](https://supabase.com) account — this is your login system
   and database (like the account system behind WhatsApp/Zomato, minus the
   scale). Free tier covers a personal prototype easily.
-- An Anthropic API key from https://console.anthropic.com (Settings → API Keys).
-  This is the only thing that costs money, and it's pay-as-you-go — a prototype
-  used by one person costs a few cents to a few dollars a month depending on use.
+- A Gemini API key from https://aistudio.google.com/apikey. This is the
+  only thing that costs money, and it's pay-as-you-go — a prototype used by
+  one person costs a few cents to a few dollars a month depending on use.
+  Google AI Studio also offers a free tier with daily request limits, which
+  may cover light personal use on its own.
 
 ## 1. Set up Supabase (auth + database)
 1. Go to [supabase.com](https://supabase.com) → **New Project**. Pick any name/region and a database password (save it somewhere).
@@ -36,9 +38,12 @@ gh repo create travel-buddy --public --source=. --push
 ## 3. Deploy to Vercel
 1. Go to vercel.com → **Add New Project** → import your `travel-buddy` GitHub repo.
 2. Vercel auto-detects Vite — leave the build settings as default.
-3. Before deploying, open **Environment Variables** and add all six:
-   - `ANTHROPIC_API_KEY` — from console.anthropic.com
+3. Before deploying, open **Environment Variables** and add all seven:
+   - `GEMINI_API_KEY` — from aistudio.google.com/apikey
    - `SUPABASE_JWT_SECRET` — from Supabase Project Settings → API
+   - `SUPABASE_SERVICE_ROLE_KEY` — from Supabase Project Settings → API →
+     `service_role`. **Extremely sensitive** — bypasses all data privacy
+     rules, powers the Admin Dashboard only. Never expose this client-side.
    - `VITE_SUPABASE_URL` — your Supabase Project URL
    - `VITE_SUPABASE_ANON_KEY` — your Supabase anon/public key
    - `ADMIN_EMAILS` — your own email (see "AI usage controls" below)
@@ -87,15 +92,21 @@ Two independent safeguards keep AI usage predictable:
   come within 1.5 km of a place you've saved.
 
 ## Viewing your users' data (the "admin" side)
-Open your project on [supabase.com](https://supabase.com) → **Table Editor**.
+
+**In the app:** Profile → Admin Dashboard (visible only to `ADMIN_EMAILS`)
+shows total users, AI usage today vs. the daily cap, most-saved places, and
+a per-user list (email, joined date, last active, saved-place count, AI
+calls today). This calls `/api/admin-stats`, which uses the Supabase
+**service role key** to read across all users — see the security note in
+`.env.example` about that key before you set it.
+
+**Directly in Supabase**, for anything the dashboard doesn't show: open your
+project on [supabase.com](https://supabase.com) → **Table Editor**.
 - `auth.users` (under Authentication) — every account that's signed up.
 - `user_data` — every user's saved places, view history, and settings, one
   row per item. Filter by `user_id` to see one person's data.
 - `shared_cache` — the shared pool of AI-generated place guides everyone draws from.
-
-This is your admin panel — no extra dashboard needed for a prototype. If you
-later want a custom in-app admin screen instead of using Supabase's UI
-directly, that's a reasonable next step, but isn't necessary to get started.
+- `ai_usage` — per-user, per-day AI call counts.
 
 ## Local development (optional)
 ```bash
@@ -117,12 +128,12 @@ instead, with the same `.env` values.
 - Every user's saved places, view history, and settings live in Postgres
   behind Row Level Security — the database itself enforces that a user can
   only read or write their own rows, not just the app's UI logic.
-- `/api/claude` now requires a valid, signed, non-expired login token on
+- `/api/gemini` now requires a valid, signed, non-expired login token on
   every request (verified server-side against your Supabase JWT secret) —
   an anonymous visitor who never logged in can't call it at all. It also
   only accepts same-origin requests, pins the model and a max token ceiling
   server-side, only allows the web-search tool, and rate-limits per user.
-- Your Anthropic API key and Supabase JWT secret live only in Vercel's
+- Your Gemini API key and Supabase JWT secret live only in Vercel's
   server-side environment variables — never sent to or readable from the browser.
 - Security headers (`vercel.json`) block the site from being embedded in
   another site's frame (clickjacking protection) and restrict camera/
@@ -133,7 +144,7 @@ instead, with the same `.env` values.
 
 **What flows off a user's device (and why):** the photo they scan, their
 search text, and their GPS coordinates (only when Roam Radar or location
-alerts are on) are sent — via the `/api/claude` proxy — to Anthropic's API
+alerts are on) are sent — via the `/api/gemini` proxy — to Google's Gemini API
 so it can identify places and research travel details. Their email and
 saved-place data are sent to Supabase to power login and sync. Nothing goes
 anywhere else, and the proxy itself logs no request content.
@@ -147,7 +158,7 @@ prototype, worth strengthening before a public launch):
 - Email confirmation is off by default in the setup steps above, for a
   smoother demo — turn it back on in Supabase before letting strangers sign up,
   so people can't create accounts with emails they don't own.
-- Set a spending limit on your Anthropic key in the console as a backstop.
+- Set a spending limit on your Gemini API key/project in Google AI Studio or Google Cloud billing as a backstop.
 - Anyone with your Supabase **service_role** key (different from the anon
   key used here) bypasses Row Level Security entirely — never put it in
   client code or commit it anywhere; this project doesn't use it.

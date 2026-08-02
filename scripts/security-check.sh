@@ -3,7 +3,7 @@
 # Security check for a deployed Travel Buddy instance.
 # Tests that the live endpoints actually REJECT what they should reject —
 # not just that they exist. Run this after every deploy, and anytime you
-# change api/claude.js, api/refresh-memory.js, or vercel.json.
+# change api/gemini.js, api/refresh-memory.js, or vercel.json.
 #
 # Usage: ./scripts/security-check.sh https://your-app.vercel.app
 
@@ -45,25 +45,25 @@ for h in "content-security-policy" "x-frame-options" "x-content-type-options" "s
 done
 echo
 
-echo "-- /api/claude: unauthenticated / malformed requests should be rejected --"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/claude")
+echo "-- /api/gemini: unauthenticated / malformed requests should be rejected --"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/gemini")
 check "GET (wrong method) -> 405" "405" "$CODE"
 
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/claude" \
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
   -H "Content-Type: application/json" -H "Origin: $BASE" \
-  -d '{"messages":[{"role":"user","content":"hi"}]}')
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
 check "POST with no auth token -> 401" "401" "$CODE"
 
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/claude" \
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
   -H "Content-Type: application/json" -H "Origin: $BASE" \
   -H "Authorization: Bearer not-a-real-token" \
-  -d '{"messages":[{"role":"user","content":"hi"}]}')
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
 check "POST with forged/garbage token -> 401" "401" "$CODE"
 
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/claude" \
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/gemini" \
   -H "Content-Type: application/json" -H "Origin: https://some-other-site.example" \
   -H "Authorization: Bearer not-a-real-token" \
-  -d '{"messages":[{"role":"user","content":"hi"}]}')
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
 check "POST from a different Origin -> 403 or 401" "403" "$CODE"
 echo "        (401 is also acceptable here — either means it was rejected before reaching the AI)"
 echo
@@ -78,6 +78,16 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/refresh-memory" 
 check "GET with no auth token -> 401" "401" "$CODE"
 echo "        (Full admin-gating and once-per-day checks need a REAL logged-in token to test —"
 echo "         see the manual step below.)"
+echo
+
+echo "-- /api/admin-stats: same checks (this one uses the service role key, so it's critical it's locked down) --"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$BASE/api/admin-stats" \
+  -H "Origin: $BASE")
+check "GET with no auth token -> 401" "401" "$CODE"
+
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/admin-stats" \
+  -H "Origin: $BASE")
+check "POST (wrong method) -> 405" "405" "$CODE"
 echo
 
 echo "-- Sensitive files should not be served --"

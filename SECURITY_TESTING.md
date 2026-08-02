@@ -58,6 +58,17 @@ Temporarily set `DAILY_AI_LIMIT_PER_USER=2` in Vercel, redeploy, use the app
 should fail with the daily-limit message. Set the env var back to your real
 value (e.g. 30) and redeploy afterward.
 
+**Test 4 — a logged-in non-admin can't see the admin dashboard data:**
+```bash
+curl -i https://your-app.vercel.app/api/admin-stats \
+  -H "Origin: https://your-app.vercel.app" \
+  -H "Authorization: Bearer PASTE_A_NON_ADMIN_TOKEN"
+```
+Expect `403`. This one matters more than the others — this endpoint uses the
+Supabase service role key, which bypasses every Row Level Security rule in
+the database. If this check ever fails open, every user's data is exposed,
+not just the admin's.
+
 ## What a clean result actually tells you (and doesn't)
 
 **It confirms:** unauthenticated requests are rejected, forged tokens are

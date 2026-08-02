@@ -15,7 +15,8 @@ import jwt from "jsonwebtoken";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createClient } from "@supabase/supabase-js";
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "gemini-3.5-flash";
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 const PLACE_REFRESH_BATCH = 5; // keep small — serverless functions have a duration limit
 function isAllowedOrigin(req) {
   const origin = req.headers.origin || "";
@@ -88,26 +89,25 @@ function extractJSON(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function callAnthropic({ prompt, tools, max_tokens = 3072 }) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("Server is missing ANTHROPIC_API_KEY");
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+async function callGemini({ prompt, tools, max_tokens = 3072 }) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Server is missing GEMINI_API_KEY");
+  const res = await fetch(GEMINI_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01"
+      "x-goog-api-key": apiKey
     },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens,
-      messages: [{ role: "user", content: prompt }],
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: max_tokens },
       ...(tools ? { tools } : {})
     })
   });
-  if (!res.ok) throw new Error(`Anthropic API error ${res.status}`);
+  if (!res.ok) throw new Error(`Gemini API error ${res.status}`);
   const data = await res.json();
-  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.filter(p => typeof p.text === "string").map(p => p.text).join("\n");
   return extractJSON(text);
 }
 
@@ -195,9 +195,9 @@ export default async function handler(req, res) {
   // Task 1: regenerate the "Popular destinations" home-screen list —
   // this is the "new places" half of the request.
   try {
-    const popularData = await callAnthropic({
+    const popularData = await callGemini({
       prompt: popularDestinationsPrompt(),
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      tools: [{ google_search: {} }],
       max_tokens: 1024
     });
     await supabase.from("shared_cache").upsert({
@@ -228,9 +228,9 @@ export default async function handler(req, res) {
         const name = parsed?.data?.name;
         const category = parsed?.data?.category || "landmark";
         if (!name) continue;
-        const freshData = await callAnthropic({
+        const freshData = await callGemini({
           prompt: contentPrompt(name, category),
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          tools: [{ google_search: {} }],
           max_tokens: 4096
         });
         await supabase.from("shared_cache").upsert({
